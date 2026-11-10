@@ -45,19 +45,19 @@ class ChatRequest(BaseModel):
 
 @app.get("/")
 def home():
-    return {"status": "online", "agent": "VESTA", "version": "1.0", "engine": "Groq Auto-Model"}
+    return {"status": "online", "agent": "VESTA", "version": "1.0", "engine": "Groq Multi-Model"}
 
 @app.post("/chat")
 async def chat_endpoint(req: ChatRequest):
     try:
-        # 1. Detectar automáticamente qué modelos de texto tiene activos tu cuenta en Groq
+        # 1. Obtener lista de modelos y filtrar los oficiales libres (Llama, Mixtral, Gemma)
         models_data = ai_client.models.list()
         chat_models = [
             m.id for m in models_data.data 
-            if "whisper" not in m.id.lower() and "guard" not in m.id.lower() and "embed" not in m.id.lower()
+            if any(k in m.id.lower() for k in ["llama", "mixtral", "gemma"]) 
+            and "guard" not in m.id.lower()
         ]
-        chosen_model = chat_models[0] if chat_models else "llama3-8b-8192"
-
+        
         # 2. Consultar inmuebles en Supabase
         try:
             inmuebles = supabase.table("immobili").select("id, titolo, descrizione, prezzo, citta, camere, bagni").limit(5).execute()
@@ -68,16 +68,3 @@ async def chat_endpoint(req: ChatRequest):
         prompt_sistema = f"{SYSTEM_PROMPT}{catalogo}"
 
         messages = [{"role": "system", "content": prompt_sistema}]
-        for msg in req.chat_history:
-            messages.append(msg)
-        messages.append({"role": "user", "content": req.message})
-
-        # 3. Responder con el modelo detectado
-        response = ai_client.chat.completions.create(
-            model=chosen_model,
-            messages=messages,
-            temperature=0.7
-        )
-        return {"reply": response.choices[0].message.content}
-    except Exception as e:
-        return {"reply": f"Aviso de conexión: {str(e)}"}
