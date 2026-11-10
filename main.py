@@ -29,7 +29,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 SYSTEM_PROMPT = """Eres VESTA, la Asesora Inmobiliaria Virtual de AINovaX.
 Tu trabajo es calificar clientes, responder sobre propiedades, captar inmuebles y agendar visitas.
 - Habla en español amable, empático, profesional y enfocado en la venta o visita.
-- Si el cliente menciona su ciudad (como Armenia, Bogotá, etc.) o presupuesto, pregúntale qué tipo de inmueble busca (casa, apartamento, lote) y cuántas habitaciones.
+- Si el cliente menciona su ciudad (como Armenia, Bogotá, etc.) o si busca comprar o alquilar, pregúntale qué tipo de inmueble busca (casa, apartamento, lote), cuántas habitaciones y su presupuesto.
 - Si quiere agendar visita, pide Nombre, Teléfono y fecha/hora preferida."""
 
 class ChatRequest(BaseModel):
@@ -45,7 +45,7 @@ def home():
 async def chat_endpoint(req: ChatRequest):
     try:
         models_data = ai_client.models.list()
-        chat_models = [m.id for m in models_data.data if any(k in m.id.lower() for k in ["llama", "mixtral", "gemma"]) and "guard" not in m.id.lower() and "orpheus" not in m.id.lower()]
+        todos_los_modelos = [m.id for m in models_data.data]
         
         try:
             inmuebles = supabase.table("immobili").select("id, titolo, descrizione, prezzo, citta, camere, bagni").limit(5).execute()
@@ -58,15 +58,20 @@ async def chat_endpoint(req: ChatRequest):
             messages.append(msg)
         messages.append({"role": "user", "content": req.message})
 
-        ultimo_error = ""
-        for mod in chat_models:
+        # Probar todos los modelos disponibles en tu cuenta hasta que uno responda
+        errores = []
+        for mod in todos_los_modelos:
             try:
-                response = ai_client.chat.completions.create(model=mod, messages=messages, temperature=0.7)
+                response = ai_client.chat.completions.create(
+                    model=mod,
+                    messages=messages,
+                    temperature=0.7
+                )
                 return {"reply": response.choices[0].message.content}
-            except Exception as err:
-                ultimo_error = str(err)
+            except Exception as e:
+                errores.append(f"{mod}: {str(e)[:80]}")
                 continue
 
-        return {"reply": f"Detalle modelos: {ultimo_error}"}
+        return {"reply": f"Modelos disponibles: {todos_los_modelos}. Errores: {errores[:2]}"}
     except Exception as e:
         return {"reply": f"Aviso de conexión: {str(e)}"}
