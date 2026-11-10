@@ -23,7 +23,6 @@ GROQ_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-# Conectar al motor ultra rápido y gratis de Groq
 ai_client = OpenAI(
     api_key=GROQ_KEY.strip(),
     base_url="https://api.groq.com/openai/v1"
@@ -34,8 +33,8 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 SYSTEM_PROMPT = """
 Eres VESTA, la Asesora Inmobiliaria Virtual de AINovaX. 
 Tu trabajo es calificar clientes, responder sobre propiedades, captar inmuebles y agendar visitas.
-- Habla siempre en español amable, empático, profesional y enfocado en vender.
-- Si el cliente te dice de qué ciudad es (como Armenia, Medellín, etc.) o si quiere "comprar" o "alquilar", pregúntale qué tipo de inmueble busca (casa, apartamento, lote), cuántas habitaciones necesita y cuál es su presupuesto.
+- Habla siempre en español amable, empático, profesional y enfocado en concretar la venta o visita.
+- Si el cliente te dice de qué ciudad es (como Armenia, Medellín, Bogotá, etc.) o si busca comprar o alquilar, pregúntale qué tipo de inmueble busca (casa, apartamento, lote), cuántas habitaciones y su presupuesto.
 - Si quiere agendar una cita o visita, pídele su Nombre completo, Teléfono y fecha/hora preferida.
 """
 
@@ -46,27 +45,36 @@ class ChatRequest(BaseModel):
 
 @app.get("/")
 def home():
-    return {"status": "online", "agent": "VESTA", "version": "1.0", "engine": "Groq LLaMA 3.3 Free"}
+    return {"status": "online", "agent": "VESTA", "version": "1.0", "engine": "Groq Auto-Model"}
 
 @app.post("/chat")
 async def chat_endpoint(req: ChatRequest):
     try:
-        # Consultar si hay casas en Supabase
-        inmuebles = supabase.table("immobili").select("id, titolo, descrizione, prezzo, citta, camere, bagni").limit(5).execute()
-        catalogo = f"\nPropiedades en catálogo:\n{json.dumps(inmuebles.data, ensure_ascii=False)}" if inmuebles.data else "\n(Catálogo actualizándose)."
-    except Exception:
-        catalogo = ""
+        # 1. Detectar automáticamente qué modelos de texto tiene activos tu cuenta en Groq
+        models_data = ai_client.models.list()
+        chat_models = [
+            m.id for m in models_data.data 
+            if "whisper" not in m.id.lower() and "guard" not in m.id.lower() and "embed" not in m.id.lower()
+        ]
+        chosen_model = chat_models[0] if chat_models else "llama3-8b-8192"
 
-    prompt_sistema = f"{SYSTEM_PROMPT}{catalogo}"
+        # 2. Consultar inmuebles en Supabase
+        try:
+            inmuebles = supabase.table("immobili").select("id, titolo, descrizione, prezzo, citta, camere, bagni").limit(5).execute()
+            catalogo = f"\nPropiedades en catálogo:\n{json.dumps(inmuebles.data, ensure_ascii=False)}" if inmuebles.data else "\n(Catálogo actualizándose)."
+        except Exception:
+            catalogo = ""
 
-    messages = [{"role": "system", "content": prompt_sistema}]
-    for msg in req.chat_history:
-        messages.append(msg)
-    messages.append({"role": "user", "content": req.message})
+        prompt_sistema = f"{SYSTEM_PROMPT}{catalogo}"
 
-    try:
+        messages = [{"role": "system", "content": prompt_sistema}]
+        for msg in req.chat_history:
+            messages.append(msg)
+        messages.append({"role": "user", "content": req.message})
+
+        # 3. Responder con el modelo detectado
         response = ai_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=chosen_model,
             messages=messages,
             temperature=0.7
         )
