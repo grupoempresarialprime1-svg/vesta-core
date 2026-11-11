@@ -52,10 +52,18 @@ def consultar_ia(messages: list, temperature: float = 0.7) -> str:
             continue
     return "¡Hola! Estoy atenta a tu solicitud. ¿En qué zona de Armenia buscas o qué tipo de inmueble te interesa?"
 
-# Helper para ejecutar llamadas a la IA con Visión Artificial (Llama 3.2 Vision)
+# Helper para ejecutar llamadas a la IA con Visión Artificial Multimodal
 def consultar_vision_ia(image_base64: str, prompt_text: str) -> str:
-    vision_models = ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"]
-    
+    # Obtener modelos activos dinámicamente o usar los vigentes en Groq
+    try:
+        models_data = ai_client.models.list()
+        all_ids = [m.id for m in models_data.data]
+        vision_candidates = [m for m in all_ids if any(k in m.lower() for k in ["vision", "qwen", "muse", "multimodal", "vl"])]
+        if not vision_candidates:
+            vision_candidates = ["qwen/qwen3.8-27b", "meta-models/muse-spark-open", "llama-3.2-90b-vision-preview"]
+    except Exception:
+        vision_candidates = ["qwen/qwen3.8-27b", "meta-models/muse-spark-open", "llama-3.2-90b-vision-preview"]
+
     if not image_base64.startswith("data:image"):
         image_url = f"data:image/jpeg;base64,{image_base64}"
     else:
@@ -71,7 +79,8 @@ def consultar_vision_ia(image_base64: str, prompt_text: str) -> str:
         }
     ]
 
-    for model_name in vision_models:
+    errores = []
+    for model_name in vision_candidates:
         try:
             res = ai_client.chat.completions.create(
                 model=model_name,
@@ -79,10 +88,13 @@ def consultar_vision_ia(image_base64: str, prompt_text: str) -> str:
                 temperature=0.1,
                 max_tokens=600
             )
-            return res.choices[0].message.content
+            if res.choices and res.choices[0].message.content:
+                return res.choices[0].message.content
         except Exception as e:
-            print(f"Vision model {model_name} error: {e}")
+            errores.append(f"{model_name}: {str(e)}")
             continue
+
+    print(f"Vision errors: {'; '.join(errores)}")
     return ""
 
 # ---------------------------------------------------------------------
@@ -138,25 +150,25 @@ class CartelRequest(BaseModel):
 async def captar_cartel(req: CartelRequest):
     resp_texto = ""
     
-    # Si viene foto, ejecutar el modelo multimodal de visión artificial
+    # Si viene foto, ejecutar visión artificial
     if req.image_base64:
-        prompt_vision = """Eres un sistema de visión artificial de alta precisión para bienes raíces en Colombia.
-Analiza la fotografía de este letrero o aviso inmobiliario de la calle.
+        prompt_vision = """Eres un sistema de visión artificial experto en bienes raíces en Colombia.
+Analiza detenidamente la fotografía de este letrero o aviso de 'Se Vende' o 'Se Arrienda'.
 
-REGLAS ESTRICTAS PARA NÚMEROS:
-En la imagen pueden aparecer muchos números diferentes:
-- Precios (ej: $150.000.000, 1.200.000, 450 millones) -> ESTO ES UN PRECIO, NUNCA ES EL TELÉFONO.
-- Áreas o metrajes (ej: 80m2, 120 mts, 240 m²) -> ES UN ÁREA, NUNCA ES EL TELÉFONO.
-- Cantidad de alcobas o baños (ej: 3 hab, 2 baños, 4 alcobas) -> NUNCA ES EL TELÉFONO.
-- Direcciones o nomenclatura (ej: Calle 14 # 23-45, Cra 19, Piso 3) -> NUNCA ES EL TELÉFONO.
+INSTRUCCIÓN CRÍTICA SOBRE NÚMEROS:
+En la imagen pueden verse varios números:
+- Precios (ej: $150.000.000, 1.200.000, etc.) -> ES UN PRECIO, NO EL TELÉFONO.
+- Áreas o metrajes (ej: 80m2, 120 mts, 240 m²) -> ES UN ÁREA, NO EL TELÉFONO.
+- Cantidad de alcobas o baños (ej: 3 hab, 2 baños) -> NO ES EL TELÉFONO.
+- Direcciones o nomenclatura (ej: Calle 14 # 23-45) -> NO ES EL TELÉFONO.
 
-TU MISIÓN:
-1. Extraer el NÚMERO DE TELÉFONO CELULAR COLOMBIANO de contacto del dueño o anunciante (número de 10 dígitos que comienza por 3, ej: 310..., 315..., 320..., 300... o fijo de 7 dígitos).
-2. Identificar si es 'Arriendo' o 'Venta'.
-3. Identificar el tipo de inmueble (Casa, Apartamento, Local, Lote).
-4. Identificar si menciona algún barrio o sector de Armenia.
+TU OBJETIVO:
+1. Extrae el NÚMERO DE TELÉFONO CELULAR DE CONTACTO (10 dígitos colombianos que comienzan por 3, o fijo de 7 dígitos).
+2. Identifica si es 'Arriendo' o 'Venta'.
+3. Identifica el tipo de inmueble (Apartamento, Casa, Local, Lote).
+4. Identifica si menciona algún barrio o sector de Armenia.
 
-Responde ÚNICAMENTE un JSON válido con esta estructura:
+Responde ÚNICAMENTE en JSON con:
 {
   "telefono": "3101234567",
   "tipo_operacion": "Arriendo",
@@ -165,15 +177,16 @@ Responde ÚNICAMENTE un JSON válido con esta estructura:
 }"""
         resp_texto = consultar_vision_ia(req.image_base64, prompt_vision)
 
-    # Fallback si no hay imagen o si falló la visión
+    # Fallback si no hay imagen o si no respondió
     if not resp_texto and (req.texto_cartel_manual or req.foto_url):
         prompt_texto = f"""Analiza la siguiente información de un letrero de 'Se Vende' o 'Se Arrienda':
         Información: {req.texto_cartel_manual or req.foto_url}
         Distingue teléfonos de precios o metrajes. Extrae teléfono celular colombiano (10 dígitos con 3), tipo_operacion ('Arriendo' o 'Venta'), tipo_inmueble y barrio.
-        Responde ÚNICAMENTE un JSON:
+        Responde ÚNICAMENTE en JSON:
         {{"telefono": "3101234567", "tipo_operacion": "Arriendo", "tipo_inmueble": "Casa", "barrio": "Armenia"}}"""
         resp_texto = consultar_ia([{"role": "user", "content": prompt_texto}], temperature=0.2)
 
+    # 1. Intentar parsear JSON
     data = {}
     if resp_texto:
         try:
@@ -182,13 +195,34 @@ Responde ÚNICAMENTE un JSON válido con esta estructura:
         except Exception:
             pass
 
-    tel_raw = str(data.get("telefono") or req.texto_cartel_manual or "")
-    match_tel = re.search(r'3\d{9}', re.sub(r'\D', '', tel_raw))
-    tel_clean = match_tel.group(0) if match_tel else re.sub(r'\D', '', tel_raw)
-    
-    tipo_op = data.get("tipo_operacion") or ("Arriendo" if "arriend" in (req.texto_cartel_manual or "").lower() else "Venta")
+    # 2. Extracción ultra-robusta de teléfono (por si la IA respondió en texto o falló el JSON)
+    tel_candidato = str(data.get("telefono") or "")
+    if not tel_candidato and resp_texto:
+        # Buscar 10 dígitos con formato colombiano que inicien por 3
+        match_tres = re.search(r'3\d{2}[\s.-]?\d{3}[\s.-]?\d{4}', resp_texto)
+        if match_tres:
+            tel_candidato = match_tres.group(0)
+        else:
+            # Buscar cualquier bloque de 10 o 7 dígitos
+            match_gen = re.search(r'\b3\d{9}\b|\b[78]\d{6}\b', resp_texto)
+            if match_gen:
+                tel_candidato = match_gen.group(0)
+
+    # Si aún no hay teléfono y el usuario escribió texto manual
+    if not tel_candidato and req.texto_cartel_manual:
+        match_manual = re.search(r'3\d{2}[\s.-]?\d{3}[\s.-]?\d{4}', req.texto_cartel_manual) or re.search(r'\b\d{7,10}\b', req.texto_cartel_manual)
+        if match_manual:
+            tel_candidato = match_manual.group(0)
+
+    tel_clean = re.sub(r'\D', '', str(tel_candidato))
+    if len(tel_clean) > 10 and tel_clean.startswith("573"):
+        tel_clean = tel_clean[2:] # Quitar 57 si ya venía incluido para unificar a 10 dígitos
+
+    # Detectar operación
+    texto_total = (resp_texto + " " + (req.texto_cartel_manual or "")).lower()
+    tipo_op = data.get("tipo_operacion") or ("Arriendo" if any(k in texto_total for k in ["arriend", "rent", "alquil"]) else "Venta")
     barrio_detectado = data.get("barrio") or req.barrio or "Armenia"
-    
+
     if tipo_op == "Arriendo":
         msg = f"Hola, buenas tardes. Vimos que tienes tu propiedad en {barrio_detectado} en arriendo. Somos Inmobiliaria La Santa María en Armenia. Te ofrecemos encargarnos de todo con póliza de arrendamiento garantizada, pago puntual cada mes y cero estrés lidiando con inquilinos. ¿Te gustaría que conversemos unos minutos sin compromiso?"
     else:
@@ -217,7 +251,8 @@ Responde ÚNICAMENTE un JSON válido con esta estructura:
         "barrio": barrio_detectado,
         "tipo_inmueble": data.get("tipo_inmueble", "Inmueble"),
         "mensaje_whatsapp": msg,
-        "whatsapp_link": whatsapp_url
+        "whatsapp_link": whatsapp_url,
+        "raw_ai_response": resp_texto[:200] if resp_texto else "Sin respuesta"
     }
 
 # ---------------------------------------------------------------------
@@ -345,4 +380,4 @@ async def listar_propiedades(tipo: str = None, operacion: str = None, ciudad: st
 
 @app.get("/")
 def root():
-    return {"status": "online", "agency": "Inmobiliaria La Santa María", "agent": "VESTA", "version": "3.0 Vision AI"}
+    return {"status": "online", "agency": "Inmobiliaria La Santa María", "agent": "VESTA", "version": "4.0 Vision Multi-Model"}
